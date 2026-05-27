@@ -88,6 +88,14 @@ Returns the optional cap on distinct investor addresses. `None` means unlimited.
 
 ---
 
+## `get_max_per_investor_cap() → Option<i128>`
+
+**Storage key:** `DataKey::MaxPerInvestorCap`
+
+Returns the optional immutable cap on cumulative principal for a single investor. `None` means unlimited.
+
+---
+
 ## `get_unique_funder_count() → u32`
 
 **Storage key:** `DataKey::UniqueFunderCount`
@@ -190,4 +198,49 @@ A `#[contracttype]` enum representing the optional `FundingCloseSnapshot`:
 
 - `None` — Escrow is not yet funded; no close snapshot exists.
 - `Some(FundingCloseSnapshot)` — The pro-rata denominator snapshot captured when the escrow first transitioned to **funded**.
+
+---
+
+## `compute_investor_payout(investor: Address) → i128`
+
+**Storage keys read:** `DataKey::InvestorContribution(investor)`, `DataKey::FundingCloseSnapshot`,
+`DataKey::InvestorEffectiveYield(investor)`, `DataKey::Escrow` (yield fallback)
+
+On-chain read-only pro-rata gross payout view. Implements the authoritative formula from
+`docs/escrow-pro-rata.md` using **floor (truncating) integer division** so that off-chain
+tooling and on-chain logic always agree on rounding.
+
+### Formula
+
+```
+coupon       = total_principal × effective_yield_bps / 10_000  (floor)
+settle_pool  = total_principal + coupon
+gross_payout = contribution × settle_pool / total_principal     (floor)
+```
+
+The `effective_yield_bps` is the investor-specific tier yield locked in at their first deposit
+(`DataKey::InvestorEffectiveYield`), falling back to `InvoiceEscrow::yield_bps` when absent.
+
+### Return values
+
+| Condition | Return |
+|-----------|--------|
+| `FundingCloseSnapshot` absent (escrow not yet funded) | `0` |
+| `InvestorContribution` absent or zero | `0` |
+| Normal case | Floor-rounded gross payout in token base units |
+
+### Invariant
+
+The sum of `compute_investor_payout` over all investors is ≤ `total_principal + coupon`.
+Any rounding residual (dust) is recoverable via `sweep_terminal_dust`.
+
+### Authorization
+
+None — pure read; no auth required. Safe to call at any escrow status.
+
+### Overflow safety
+
+All multiplications use `i128::checked_mul`; divisions use `i128::checked_div`.
+Panics with `"compute_investor_payout: arithmetic overflow"` rather than silently
+returning a wrong value.
 

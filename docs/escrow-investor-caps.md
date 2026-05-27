@@ -17,6 +17,7 @@ The LiquiFact escrow contract provides configurable limits on the number of dist
 ### Storage Schema
 
 - `DataKey::MaxUniqueInvestorsCap`: Optional `u32` cap on distinct investors
+- `DataKey::MaxPerInvestorCap`: Optional `i128` cap on cumulative principal per investor address
 - `DataKey::UniqueFunderCount`: Current count of distinct funders (initialized to 0)
 
 ## Implementation Details
@@ -53,6 +54,13 @@ if prev == 0 {
 - **Panic message:** `"unique investor cap reached"`
 - **Edge case:** Existing investors can always add more principal (doesn't count against cap)
 
+### Per-investor Cap Enforcement
+
+- **When checked:** On every deposit, for both first-time and returning investors
+- **What is checked:** `previous_contribution + amount <= configured_per_investor_cap`
+- **Panic message:** `"investor contribution exceeds max_per_investor cap"`
+- **Edge case:** A returning investor cannot exceed their configured cap across repeated deposits
+
 ### Initialization
 
 The cap is set during escrow initialization via the `max_unique_investors` parameter:
@@ -61,12 +69,15 @@ The cap is set during escrow initialization via the `max_unique_investors` param
 pub fn init(
     // ... other parameters
     max_unique_investors: Option<u32>,
+    max_per_investor: Option<i128>,
 ) -> InvoiceEscrow
 ```
 
-- `None`: No cap (unlimited investors)
-- `Some(n)`: Cap of `n` distinct investors
-- **Validation:** Cap must be positive if configured (`> 0`)
+- `None` for `max_unique_investors`: No distinct-investor cap (unlimited investors)
+- `Some(n)` for `max_unique_investors`: Cap of `n` distinct investors
+- `None` for `max_per_investor`: No per-investor cap (unlimited principal per address)
+- `Some(x)` for `max_per_investor`: Immutable maximum cumulative principal per investor address
+- **Validation:** Both caps must be positive if configured (`> 0`)
 
 ## API Reference
 
@@ -79,6 +90,17 @@ Returns the configured cap, or `None` if unlimited.
 #### `get_unique_funder_count(env: Env) -> u32`
 
 Returns the current count of distinct funders.
+
+#### `lower_max_unique_investors(env: Env, new_cap: u32) -> u32`
+
+Admin-only: reduces the configured cap while the escrow is **open** (status `0`).
+
+- Requires admin authorization.
+- Only permitted when a cap was configured at init.
+- `new_cap` must satisfy `unique_funder_count <= new_cap < old_cap`.
+- Rejects raising the cap or imposing a cap on an unlimited escrow.
+- Emits `MaxUniqueInvestorsCapLowered` (`inv_cap`) for indexers.
+- Returns the stored cap after update (same as `get_max_unique_investors_cap()`).
 
 ### Usage Examples
 
@@ -99,6 +121,7 @@ client.init(
     &yield_tiers,
     &min_contribution,
     &Some(10u32), // Max 10 investors
+    &Some(100_000_000_000i128), // Max 100 billion units per investor
 );
 ```
 
@@ -118,7 +141,8 @@ client.init(
     &treasury,
     &yield_tiers,
     &min_contribution,
-    &None, // No cap
+    &None, // No distinct-investor cap
+    &None, // No per-investor cap
 );
 ```
 
@@ -209,13 +233,14 @@ The cap is checked AFTER allowlist validation:
 - **Cap enforcement:** Strictly enforced with panic on violation
 - **Counter accuracy:** Atomic operations prevent race conditions
 - **Re-funding safety:** Existing investors can always add more principal
+- **Cap tightening:** Admin may lower the cap while open via `lower_max_unique_investors`; cannot raise
 
 ### Out of Scope
 
 - **Sybil resistance:** No mechanism to prevent one person from using multiple addresses
 - **Identity verification:** No KYC/AML integration
-- **Dynamic caps:** Caps cannot be changed after initialization
-- **Cap reduction:** No mechanism to lower caps post-deployment
+- **Cap increases:** Caps cannot be raised after initialization (including unlimited → capped)
+- **Cap lowering below enrolled funders:** Rejected to preserve the retroactive-cap invariant
 
 ### Token Economics Assumptions
 
@@ -294,11 +319,11 @@ Monitor these metrics during live operation:
 
 ### Emergency Procedures
 
-If cap exhaustion becomes an issue:
+If cap exhaustion becomes an issue while the escrow is still **open**:
 
-1. **No on-chain solution:** Caps cannot be increased post-deployment
-2. **New escrow deployment:** Required for different cap settings
-3. **Off-chain coordination:** Direct investors to new escrow instances
+1. **Lower the cap:** Admin may call `lower_max_unique_investors` to tighten the limit (cannot raise).
+2. **New escrow deployment:** Required for a higher cap or to change unlimited → capped.
+3. **Off-chain coordination:** Direct investors to new escrow instances when needed.
 
 ## Best Practices
 
@@ -338,4 +363,4 @@ When deploying capped escrows:
 
 The MaxUniqueInvestorsCap and UniqueFunderCount functionality provides a robust, Sybil-limited mechanism for controlling investor participation in LiquiFact escrows. While it doesn't prevent Sybil attacks, it offers operational control and compliance benefits with clear semantics and comprehensive edge case handling.
 
-The implementation prioritizes safety and predictability, with strict enforcement and clear error messages. Organizations should carefully consider their cap requirements during deployment, as caps cannot be modified after initialization.
+The implementation prioritizes safety and predictability, with strict enforcement and clear error messages. Organizations should carefully consider their cap requirements during deployment; caps can be **lowered** while open but never raised.

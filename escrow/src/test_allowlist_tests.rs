@@ -1,5 +1,6 @@
 use super::{LiquifactEscrow, LiquifactEscrowClient};
 use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::Vec as SorobanVec;
 
 fn deploy(env: &Env) -> LiquifactEscrowClient<'_> {
     let id = env.register(LiquifactEscrow, ());
@@ -24,6 +25,7 @@ fn init(env: &Env, client: &LiquifactEscrowClient) -> (Address, Address) {
         &None,
         &None,
         &None,
+        &None
     );
     (admin, sme)
 }
@@ -53,16 +55,55 @@ fn test_is_allowlisted_false_by_default() {
 
 #[test]
 fn test_enable_and_disable_allowlist() {
+    use soroban_sdk::testutils::Events as _;
+
     let env = Env::default();
     env.mock_all_auths();
     let client = deploy(&env);
     init(&env, &client);
+    let invoice_id = client.get_escrow().invoice_id;
+    let contract_id = client.address.clone();
 
     client.set_allowlist_active(&true);
-    assert!(client.is_allowlist_active());
+    let enabled_events = env.events().all();
+    env.as_contract(&contract_id, || {
+        assert!(
+            env.storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::AllowlistActive)
+                == Some(true)
+        );
+    });
 
     client.set_allowlist_active(&false);
-    assert!(!client.is_allowlist_active());
+    let disabled_events = env.events().all();
+    env.as_contract(&contract_id, || {
+        assert!(
+            env.storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::AllowlistActive)
+                == Some(false)
+        );
+    });
+
+    assert_eq!(
+        enabled_events,
+        std::vec![AllowlistEnabledChanged {
+            name: symbol_short!("al_ena"),
+            invoice_id: invoice_id.clone(),
+            active: 1,
+        }
+        .to_xdr(&env, &contract_id)]
+    );
+    assert_eq!(
+        disabled_events,
+        std::vec![AllowlistEnabledChanged {
+            name: symbol_short!("al_ena"),
+            invoice_id,
+            active: 0,
+        }
+        .to_xdr(&env, &contract_id)]
+    );
 }
 
 #[test]
@@ -92,17 +133,58 @@ fn test_disable_allowlist_requires_admin_auth() {
 
 #[test]
 fn test_add_and_remove_from_allowlist() {
+    use soroban_sdk::testutils::Events as _;
+
     let env = Env::default();
     env.mock_all_auths();
     let client = deploy(&env);
     init(&env, &client);
+    let invoice_id = client.get_escrow().invoice_id;
+    let contract_id = client.address.clone();
     let investor = Address::generate(&env);
 
     client.set_investor_allowlisted(&investor, &true);
-    assert!(client.is_investor_allowlisted(&investor));
+    let added_events = env.events().all();
+    env.as_contract(&contract_id, || {
+        assert!(
+            env.storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::InvestorAllowlisted(investor.clone()))
+                == Some(true)
+        );
+    });
 
     client.set_investor_allowlisted(&investor, &false);
-    assert!(!client.is_investor_allowlisted(&investor));
+    let removed_events = env.events().all();
+    env.as_contract(&contract_id, || {
+        assert!(
+            env.storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::InvestorAllowlisted(investor.clone()))
+                == Some(false)
+        );
+    });
+
+    assert_eq!(
+        added_events,
+        std::vec![InvestorAllowlistChanged {
+            name: symbol_short!("al_set"),
+            invoice_id: invoice_id.clone(),
+            investor: investor.clone(),
+            allowed: 1,
+        }
+        .to_xdr(&env, &contract_id)]
+    );
+    assert_eq!(
+        removed_events,
+        std::vec![InvestorAllowlistChanged {
+            name: symbol_short!("al_set"),
+            invoice_id,
+            investor: investor.clone(),
+            allowed: 0,
+        }
+        .to_xdr(&env, &contract_id)]
+    );
 }
 
 #[test]
@@ -153,6 +235,18 @@ fn test_fund_allowed_when_allowlist_disabled() {
     let investor = Address::generate(&env);
     // Allowlist off — anyone can fund.
     let escrow = client.fund(&investor, &5_000i128);
+    assert_eq!(escrow.funded_amount, 5_000i128);
+}
+
+#[test]
+fn test_fund_with_commitment_allowed_when_allowlist_disabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    init(&env, &client);
+    let investor = Address::generate(&env);
+    // Allowlist off — anyone can fund with commitment.
+    let escrow = client.fund_with_commitment(&investor, &5_000i128, &0u64);
     assert_eq!(escrow.funded_amount, 5_000i128);
 }
 
@@ -288,4 +382,78 @@ fn test_multiple_investors_independent_allowlist_entries() {
         client.fund(&c, &1_000i128);
     }));
     assert!(blocked.is_err());
+}
+
+#[test]
+fn test_batch_add_and_remove_from_allowlist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    init(&env, &client);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    let mut v: SorobanVec<Address> = SorobanVec::new(&env);
+    v.push_back(a.clone());
+    v.push_back(b.clone());
+    v.push_back(c.clone());
+
+    client.set_investors_allowlisted(&v, &true);
+
+    assert!(client.is_investor_allowlisted(&a));
+    assert!(client.is_investor_allowlisted(&b));
+    assert!(client.is_investor_allowlisted(&c));
+
+    client.set_investors_allowlisted(&v, &false);
+
+    assert!(!client.is_investor_allowlisted(&a));
+    assert!(!client.is_investor_allowlisted(&b));
+    assert!(!client.is_investor_allowlisted(&c));
+}
+
+#[test]
+#[should_panic(expected = "investors vector must be non-empty")]
+fn test_batch_rejects_empty_vector() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    init(&env, &client);
+
+    let v: SorobanVec<Address> = SorobanVec::new(&env);
+    client.set_investors_allowlisted(&v, &true);
+}
+
+#[test]
+#[should_panic(expected = "investors vector length exceeds MAX_INVESTOR_ALLOWLIST_BATCH")]
+fn test_batch_rejects_too_large_vector() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    init(&env, &client);
+
+    let mut v: SorobanVec<Address> = SorobanVec::new(&env);
+    let cap = super::MAX_INVESTOR_ALLOWLIST_BATCH as usize;
+    for _ in 0..(cap + 1) {
+        v.push_back(Address::generate(&env));
+    }
+
+    client.set_investors_allowlisted(&v, &true);
+}
+
+#[test]
+#[should_panic]
+fn test_batch_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    init(&env, &client);
+
+    let a = Address::generate(&env);
+    let mut v: SorobanVec<Address> = SorobanVec::new(&env);
+    v.push_back(a.clone());
+
+    env.mock_auths(&[]);
+    client.set_investors_allowlisted(&v, &true);
 }

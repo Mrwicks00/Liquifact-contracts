@@ -16,6 +16,43 @@ All events follow the Soroban `contractevent` format. Key fields like `invoice_i
 
 ## 📋 Event Catalog
 
+### `EscrowInitialized`
+Emitted once by `init()`. Carries the escrow snapshot plus immutable bound references so
+indexers can register `funding_token`, `treasury`, and optional `registry` without follow-up reads.
+
+**Topics:**
+1. `escrow_ii` (Symbol)
+
+**Data Payload:**
+- `escrow` (`InvoiceEscrow`)
+- `funding_token` (`Address`) — equals `DataKey::FundingToken`
+- `treasury` (`Address`) — equals `DataKey::Treasury`
+- `registry` (`Option<Address>`) — equals `DataKey::RegistryRef`
+
+**Example (JSON Decoded):**
+```json
+{
+  "topics": ["escrow_ii"],
+  "data": {
+    "escrow": { "invoice_id": "INV_001", "status": 0 },
+    "funding_token": "CTOKEN...",
+    "treasury": "GTREAS...",
+    "registry": "GREG..."
+  }
+}
+```
+
+### `MaxUniqueInvestorsCapLowered`
+Emitted when admin calls `lower_max_unique_investors` while the escrow is open.
+
+**Topics:**
+1. `inv_cap` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `old_cap` (u32)
+- `new_cap` (u32)
+
 ### `EscrowFunded`
 Emitted when an investor deposits principal.
 
@@ -82,6 +119,24 @@ Emitted when an investor records their payout claim.
   "data": null
 }
 ```
+
+### `InvestorAllowlistChanged`
+Emitted when an admin adds or removes an investor from the allowlist. This event is
+emitted per-address even when the change is performed via the batch entrypoint
+`set_investors_allowlisted`, so indexers receive one `InvestorAllowlistChanged` event
+for each address in the batch.
+
+**Topics:**
+1. `al_set` (Symbol)
+2. `invoice_id` (Symbol)
+3. `investor` (Address)
+
+**Data Payload:**
+- `allowed` (u32): `1` for allowed, `0` for blocked.
+
+**Notes:**
+- Batch mutations via `set_investors_allowlisted` emit one `al_set` event per affected
+  investor to preserve parity with individual `set_investor_allowlisted` calls.
 
 ### `LegalHoldChanged`
 Emitted when an admin toggles the compliance hold.

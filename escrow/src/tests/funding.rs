@@ -20,6 +20,7 @@ fn test_fund_and_settle() {
         &None,
         &None,
         &None,
+        &None
     );
     let funded = client.fund(&investor, &TARGET);
     assert_eq!(funded.funded_amount, TARGET);
@@ -46,6 +47,7 @@ fn test_fund_partial_then_full() {
         &None,
         &None,
         &None,
+        &None
     );
     let partial = client.fund(&investor, &(TARGET / 2));
     assert_eq!(partial.status, 0);
@@ -107,6 +109,7 @@ fn test_single_investor_contribution_tracked() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &(30_000_000_000i128));
     let contribution = client.get_contribution(&investor);
@@ -142,6 +145,7 @@ fn test_repeated_funding_accumulates_contribution() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &(20_000_000_000i128));
     client.fund(&investor, &(30_000_000_000i128));
@@ -167,6 +171,7 @@ fn test_funding_amount_accumulation_overflow_panics() {
         &None,
         &None,
         &None,
+        &None
     );
 
     client.fund(&investor, &(i128::MAX - 1));
@@ -191,6 +196,7 @@ fn test_funding_amount_overflow_does_not_mutate_state() {
         &None,
         &None,
         &None,
+        &None
     );
 
     client.fund(&investor, &(i128::MAX - 1));
@@ -205,6 +211,166 @@ fn test_funding_amount_overflow_does_not_mutate_state() {
     assert_eq!(after.funded_amount, before.funded_amount);
     assert_eq!(after.status, 0);
     assert_eq!(client.get_contribution(&investor), i128::MAX - 1);
+}
+
+#[test]
+#[should_panic(expected = "funded_amount overflow")]
+fn test_fund_with_commitment_overflow_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor_a = Address::generate(&env);
+    let investor_b = Address::generate(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "OVF001b"),
+        &sme,
+        &i128::MAX,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+    );
+
+    client.fund(&investor_a, &(i128::MAX - 1));
+    client.fund_with_commitment(&investor_b, &2i128, &0u64);
+}
+
+#[test]
+fn test_fund_with_commitment_overflow_does_not_mutate_state() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor_a = Address::generate(&env);
+    let investor_b = Address::generate(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "OVF002b"),
+        &sme,
+        &i128::MAX,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+    );
+
+    client.fund(&investor_a, &(i128::MAX - 1));
+    let before = client.get_escrow();
+
+    let overflowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.fund_with_commitment(&investor_b, &2i128, &0u64);
+    }));
+    assert!(overflowed.is_err());
+
+    let after = client.get_escrow();
+    assert_eq!(after.funded_amount, before.funded_amount);
+    assert_eq!(after.status, 0);
+    assert_eq!(client.get_contribution(&investor_b), 0);
+}
+
+#[test]
+#[should_panic(expected = "investor contribution overflow")]
+fn test_investor_contribution_overflow_panics_even_if_state_is_inconsistent() {
+    // This test intentionally constructs an inconsistent storage snapshot to ensure
+    // the per-investor accounting never wraps even under corrupted / unexpected state.
+    //
+    // Rationale: `funded_amount` overflow is already guarded by checked_add. This test
+    // separately proves the per-investor `InvestorContribution` update uses checked_add.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let contract_id = client.address.clone();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+
+    client.init(
+        &admin,
+        &String::from_str(&env, "OVF003"),
+        &sme,
+        &1_000i128,
+        &800i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+
+    env.as_contract(&contract_id, || {
+        // Force the contribution near i128::MAX while keeping funded_amount small.
+        // `fund` must still trap on contribution overflow even if funded_amount would not.
+        env.storage().instance().set(
+            &DataKey::InvestorContribution(investor.clone()),
+            &(i128::MAX - 1),
+        );
+        let mut escrow = LiquifactEscrow::get_escrow(env.clone());
+        escrow.funded_amount = 0;
+        escrow.status = 0;
+        env.storage().instance().set(&DataKey::Escrow, &escrow);
+    });
+
+    client.fund(&investor, &2i128);
+}
+
+#[test]
+fn test_investor_contribution_overflow_does_not_mutate_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let contract_id = client.address.clone();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+
+    client.init(
+        &admin,
+        &String::from_str(&env, "OVF004"),
+        &sme,
+        &1_000i128,
+        &800i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(
+            &DataKey::InvestorContribution(investor.clone()),
+            &(i128::MAX - 1),
+        );
+        let mut escrow = LiquifactEscrow::get_escrow(env.clone());
+        escrow.funded_amount = 0;
+        escrow.status = 0;
+        env.storage().instance().set(&DataKey::Escrow, &escrow);
+    });
+
+    let before_escrow = client.get_escrow();
+    let before_contribution = client.get_contribution(&investor);
+
+    let overflowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.fund(&investor, &2i128);
+    }));
+    assert!(overflowed.is_err());
+
+    assert_eq!(client.get_escrow(), before_escrow);
+    assert_eq!(client.get_contribution(&investor), before_contribution);
 }
 
 #[test]
@@ -227,6 +393,7 @@ fn test_multiple_investors_tracked_independently() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&inv_a, &(20_000_000_000i128));
     client.fund(&inv_b, &(50_000_000_000i128));
@@ -260,6 +427,7 @@ fn test_contributions_sum_equals_funded_amount() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&inv_a, &(20_000_000_000i128));
     client.fund(&inv_b, &(50_000_000_000i128));
@@ -288,6 +456,7 @@ fn test_cost_baseline_fund_partial() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &(10_000_000_000i128));
 }
@@ -310,6 +479,7 @@ fn test_cost_baseline_fund_full() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &TARGET);
 }
@@ -332,6 +502,7 @@ fn test_cost_baseline_fund_overshoot() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &(150_000_000_000i128));
     assert_eq!(client.get_escrow().status, 1);
@@ -355,6 +526,7 @@ fn test_cost_baseline_fund_two_step_completion() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &(TARGET / 2));
     client.fund(&investor, &(TARGET / 2));
@@ -383,6 +555,7 @@ fn test_funding_close_snapshot_captures_overfunded_total_once() {
         &None,
         &None,
         &None,
+        &None
     );
     assert_eq!(client.get_funding_close_snapshot(), None);
     client.fund(&inv, &(TARGET + 50_000_000_000i128));
@@ -416,6 +589,7 @@ fn test_funding_snapshot_immutable_across_second_fund_after_funded() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&a, &(TARGET / 2));
     assert_eq!(client.get_funding_close_snapshot(), None);
@@ -449,6 +623,7 @@ fn test_pro_rata_weight_ratio_from_snapshot() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&a, &(20_000_000_000i128));
     client.fund(&b, &(80_000_000_000i128));
@@ -490,6 +665,7 @@ fn test_tiered_yield_and_follow_on_fund() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
     client.fund_with_commitment(&inv, &5_000i128, &200u64);
     assert_eq!(client.get_investor_yield_bps(&inv), 900);
@@ -527,6 +703,7 @@ fn test_tier_selection_edges_base_vs_high_bucket() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
     client.fund_with_commitment(&i_short, &10_000i128, &40u64);
     assert_eq!(client.get_investor_yield_bps(&i_short), 800);
@@ -562,6 +739,7 @@ fn test_fund_with_commitment_twice_panics() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
     client.fund_with_commitment(&inv, &5_000i128, &10u64);
     client.fund_with_commitment(&inv, &5_000i128, &10u64);
@@ -590,6 +768,7 @@ fn test_fund_then_fund_with_commitment_panics() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&inv, &5_000i128);
     client.fund_with_commitment(&inv, &5_000i128, &10u64);
@@ -627,6 +806,7 @@ fn test_tier_selection_ladder() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
 
     let inv_base = Address::generate(&env);
@@ -680,6 +860,7 @@ fn test_fund_with_commitment_zero_lock_behaves_as_fund() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
 
     client.fund_with_commitment(&inv, &5_000i128, &0u64);
@@ -712,6 +893,7 @@ fn test_commitment_claim_time_allows_u64_max_boundary() {
         &None,
         &None,
         &None,
+        &None
     );
 
     client.fund_with_commitment(&investor, &100i128, &5u64);
@@ -745,6 +927,7 @@ fn test_commitment_claim_time_overflow_panics() {
         &None,
         &None,
         &None,
+        &None
     );
 
     client.fund_with_commitment(&investor, &100i128, &6u64);
@@ -775,6 +958,7 @@ fn test_commitment_claim_time_overflow_does_not_record_position() {
         &None,
         &None,
         &None,
+        &None
     );
 
     let overflowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -818,6 +1002,7 @@ fn test_init_bad_tier_order_panics() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
 }
 
@@ -848,6 +1033,7 @@ fn test_init_tier_yield_below_base_panics() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
 }
 
@@ -874,6 +1060,7 @@ fn test_differential_funding_target_eq_exact_cross() {
         &None,
         &None,
         &None,
+        &None
     );
     let escrow = client.fund(&inv, &t);
     assert_eq!(escrow.funded_amount, t);
@@ -905,6 +1092,7 @@ fn test_ledger_sequence_recorded_in_snapshot_with_tick() {
         &None,
         &None,
         &None,
+        &None
     );
     let seq = env.ledger().sequence();
     client.fund(&inv, &1_000i128);
@@ -934,6 +1122,7 @@ fn test_get_funding_close_snapshot_absent_before_any_funding() {
         &None,
         &None,
         &None,
+        &None
     );
     assert_eq!(
         client.get_funding_close_snapshot(),
@@ -965,6 +1154,7 @@ fn test_get_funding_close_snapshot_present_after_funding_completes() {
         &None,
         &None,
         &None,
+        &None
     );
     // Partial fund — snapshot still absent.
     client.fund(&inv, &(TARGET / 2));
@@ -1007,6 +1197,7 @@ fn test_get_funding_close_snapshot_immutable_after_set() {
         &None,
         &None,
         &None,
+        &None
     );
     // Fund exactly to target — snapshot is written here.
     client.fund(&inv, &TARGET);
@@ -1043,6 +1234,7 @@ fn test_unique_funder_count_initialized_to_zero() {
         &None,
         &None,
         &None,
+        &None
     );
     assert_eq!(client.get_unique_funder_count(), 0);
 }
@@ -1065,6 +1257,7 @@ fn test_unique_funder_count_increments_on_first_investor() {
         &None,
         &None,
         &None,
+        &None
     );
     assert_eq!(client.get_unique_funder_count(), 0);
     client.fund(&investor, &(TARGET / 2));
@@ -1093,6 +1286,7 @@ fn test_unique_funder_count_increments_for_distinct_investors() {
         &None,
         &None,
         &None,
+        &None
     );
     assert_eq!(client.get_unique_funder_count(), 0);
 
@@ -1136,6 +1330,7 @@ fn test_unique_funder_count_with_fund_with_commitment() {
         &Some(tiers),
         &None,
         &None,
+        &None
     );
 
     assert_eq!(client.get_unique_funder_count(), 0);
@@ -1553,6 +1748,7 @@ fn test_cap_panic_message_quality() {
         &None,
         &None,
         &Some(1u32),
+        &None
     );
 
     // Add first investor
@@ -1562,4 +1758,262 @@ fn test_cap_panic_message_quality() {
     // Try to add second investor - should panic with clear message
     let inv2 = Address::generate(&env);
     client.fund(&inv2, &(TARGET / 2));
+}
+
+// ── cancel_funding and refund tests ──────────────────────────────────────────
+
+fn init_with_token<'a>(
+    env: &'a Env,
+    client: &LiquifactEscrowClient<'a>,
+    admin: &Address,
+    sme: &Address,
+) -> (
+    crate::tests::StellarTestToken<'a>,
+    Address, // treasury
+) {
+    let token = install_stellar_asset_token(env);
+    let treasury = Address::generate(env);
+    client.init(
+        admin,
+        &String::from_str(env, "REFUND01"),
+        sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token.id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+    );
+    (token, treasury)
+}
+
+#[test]
+fn test_cancel_funding_transitions_to_status_4() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    let result = client.cancel_funding();
+    assert_eq!(result.status, 4);
+}
+
+#[test]
+fn test_cancel_funding_requires_admin_auth() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.cancel_funding();
+    assert!(
+        env.auths().iter().any(|(addr, _)| *addr == admin),
+        "admin auth was not recorded for cancel_funding"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cancel_funding only allowed in Open state")]
+fn test_cancel_funding_panics_if_already_funded() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    let investor = Address::generate(&env);
+    client.fund(&investor, &TARGET);
+    client.cancel_funding();
+}
+
+#[test]
+#[should_panic(expected = "cancel_funding only allowed in Open state")]
+fn test_cancel_funding_panics_if_already_cancelled() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.cancel_funding();
+    client.cancel_funding();
+}
+
+#[test]
+#[should_panic(expected = "Legal hold blocks cancel_funding")]
+fn test_cancel_funding_blocked_by_legal_hold() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.set_legal_hold(&true);
+    client.cancel_funding();
+}
+
+#[test]
+fn test_refund_returns_principal_to_investor() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, _treasury) = init_with_token(&env, &client, &admin, &sme);
+
+    // Mint tokens into the escrow contract so it can refund
+    let contract_id = client.address.clone();
+    token.stellar.mint(&contract_id, &TARGET);
+
+    client.fund(&investor, &TARGET);
+    // Undo funded status by cancelling — but fund() moved status to 1, so we need open state.
+    // Re-init with partial fund instead.
+    let env2 = Env::default();
+    let (client2, admin2, sme2) = setup(&env2);
+    let investor2 = Address::generate(&env2);
+    let (token2, _) = init_with_token(&env2, &client2, &admin2, &sme2);
+    let contract_id2 = client2.address.clone();
+    token2.stellar.mint(&contract_id2, &(TARGET / 2));
+    client2.fund(&investor2, &(TARGET / 2));
+    client2.cancel_funding();
+
+    let before = token2.token.balance(&investor2);
+    client2.refund(&investor2);
+    let after = token2.token.balance(&investor2);
+    assert_eq!(after - before, TARGET / 2);
+}
+
+#[test]
+fn test_refund_zeroes_contribution() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, _) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    token.stellar.mint(&contract_id, &(TARGET / 2));
+    client.fund(&investor, &(TARGET / 2));
+    client.cancel_funding();
+    client.refund(&investor);
+    assert_eq!(client.get_contribution(&investor), 0);
+}
+
+#[test]
+fn test_refund_marks_investor_refunded() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, _) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    token.stellar.mint(&contract_id, &(TARGET / 2));
+    client.fund(&investor, &(TARGET / 2));
+    client.cancel_funding();
+    assert!(!client.is_investor_refunded(&investor));
+    client.refund(&investor);
+    assert!(client.is_investor_refunded(&investor));
+}
+
+#[test]
+#[should_panic(expected = "no contribution to refund")]
+fn test_refund_double_spend_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, _) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    token.stellar.mint(&contract_id, &(TARGET / 2));
+    client.fund(&investor, &(TARGET / 2));
+    client.cancel_funding();
+    client.refund(&investor);
+    client.refund(&investor); // second call must panic
+}
+
+#[test]
+#[should_panic(expected = "no contribution to refund")]
+fn test_refund_non_investor_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.cancel_funding();
+    let stranger = Address::generate(&env);
+    client.refund(&stranger);
+}
+
+#[test]
+#[should_panic(expected = "refund only allowed in Cancelled state")]
+fn test_refund_panics_in_open_state() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.fund(&investor, &(TARGET / 2));
+    client.refund(&investor);
+}
+
+#[test]
+#[should_panic(expected = "refund only allowed in Cancelled state")]
+fn test_refund_panics_in_funded_state() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.fund(&investor, &TARGET);
+    assert_eq!(client.get_escrow().status, 1);
+    client.refund(&investor);
+}
+
+#[test]
+fn test_refund_requires_investor_auth() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, _) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    token.stellar.mint(&contract_id, &(TARGET / 2));
+    client.fund(&investor, &(TARGET / 2));
+    client.cancel_funding();
+    client.refund(&investor);
+    assert!(
+        env.auths().iter().any(|(addr, _)| *addr == investor),
+        "investor auth was not recorded for refund"
+    );
+}
+
+#[test]
+fn test_refund_multiple_investors_independent() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let (token, _) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    let amt_a = TARGET / 3;
+    let amt_b = TARGET / 4;
+    token.stellar.mint(&contract_id, &(amt_a + amt_b));
+    client.fund(&inv_a, &amt_a);
+    client.fund(&inv_b, &amt_b);
+    client.cancel_funding();
+
+    let before_a = token.token.balance(&inv_a);
+    let before_b = token.token.balance(&inv_b);
+    client.refund(&inv_a);
+    client.refund(&inv_b);
+    assert_eq!(token.token.balance(&inv_a) - before_a, amt_a);
+    assert_eq!(token.token.balance(&inv_b) - before_b, amt_b);
+}
+
+#[test]
+fn test_cancel_funding_preserves_funded_amount() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    default_init(&client, &env, &admin, &sme);
+    client.fund(&investor, &(TARGET / 2));
+    let cancelled = client.cancel_funding();
+    assert_eq!(cancelled.funded_amount, TARGET / 2);
+}
+
+#[test]
+fn test_sweep_terminal_dust_allowed_in_cancelled_state() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let (token, treasury) = init_with_token(&env, &client, &admin, &sme);
+    let contract_id = client.address.clone();
+    // Mint slightly more than the investor contributes to leave dust
+    token.stellar.mint(&contract_id, &(TARGET / 2 + 1));
+    client.fund(&investor, &(TARGET / 2));
+    client.cancel_funding();
+    client.refund(&investor);
+    // 1 unit of dust remains in the contract
+    let swept = client.sweep_terminal_dust(&1i128);
+    assert_eq!(swept, 1i128);
+    assert_eq!(token.token.balance(&treasury), 1i128);
 }

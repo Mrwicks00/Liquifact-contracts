@@ -264,6 +264,7 @@ fn test_claim_investor_twice_is_idempotent() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -297,6 +298,7 @@ fn test_claim_by_non_investor_panics() {
         &None,
         &None,
         &None,
+        &None
     );
     // Escrow settled but stranger never funded
     let investor = Address::generate(&env);
@@ -325,6 +327,7 @@ fn test_clashing_investors_have_independent_claims() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&inv_a, &1_000i128);
     client.fund(&inv_b, &1_000i128);
@@ -407,6 +410,7 @@ fn test_claim_blocked_until_commitment_ledger_time() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund_with_commitment(&inv, &1_000i128, &500u64);
     client.settle();
@@ -435,6 +439,7 @@ fn test_claim_succeeds_after_commitment_and_settle() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund_with_commitment(&inv, &1_000i128, &100u64);
     client.settle();
@@ -468,6 +473,7 @@ fn test_claim_gating_exact_timestamp() {
         &None,
         &None,
         &None,
+        &None
     );
 
     let lock_duration = 500u64;
@@ -515,6 +521,7 @@ fn test_claim_gating_with_multiple_investors() {
         &None,
         &None,
         &None,
+        &None
     );
 
     client.fund_with_commitment(&inv1, &1_000i128, &100u64); // Expiry 1100
@@ -557,6 +564,7 @@ fn test_cost_baseline_settle() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &TARGET);
     env.ledger().set_timestamp(1001);
@@ -607,6 +615,7 @@ fn settle_with_maturity_zero_succeeds_immediately() {
         &None,
         &None,
         &None,
+        &None
     );
 
     fund_to_target(&client, &env);
@@ -642,6 +651,7 @@ fn settle_at_maturity_succeeds() {
         &None,
         &None,
         &None,
+        &None
     );
 
     fund_to_target(&client, &env);
@@ -774,6 +784,7 @@ fn test_sweep_terminal_dust_after_settle_transfers_to_treasury() {
         &None,
         &None,
         &None,
+        &None
     );
     let investor = Address::generate(&env);
     client.fund(&investor, &1_000i128);
@@ -810,6 +821,7 @@ fn test_sweep_terminal_dust_after_withdraw_and_ledger_tick() {
         &None,
         &None,
         &None,
+        &None
     );
     let investor = Address::generate(&env);
     client.fund(&investor, &1_000i128);
@@ -844,6 +856,7 @@ fn test_sweep_rejected_when_open() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -870,6 +883,7 @@ fn test_sweep_blocked_under_legal_hold() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -898,6 +912,7 @@ fn test_sweep_rejects_amount_above_dust_cap() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     // status == 1 (funded), not settled — must panic
@@ -925,6 +940,7 @@ fn test_sweep_caps_at_contract_balance() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -950,6 +966,7 @@ fn test_sweep_requires_treasury_auth() {
         &None,
         &None,
         &None,
+        &None
     );
     fund_to_target(&client, &env);
     client.settle();
@@ -1063,6 +1080,7 @@ fn test_is_investor_claimed_false_before_any_claim() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1090,6 +1108,7 @@ fn test_is_investor_claimed_returns_false_for_unfunded_address() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1115,6 +1134,7 @@ fn test_claim_marker_persists_after_claim() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1143,6 +1163,7 @@ fn test_claim_marker_isolated_per_investor() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&investor_a, &1_000i128);
     client.fund(&investor_b, &1_000i128);
@@ -1174,6 +1195,7 @@ fn test_claim_marker_all_investors_independent() {
         &None,
         &None,
         &None,
+        &None
     );
     client.fund(&inv_a, &1_000i128);
     client.fund(&inv_b, &1_000i128);
@@ -1276,4 +1298,388 @@ fn no_state_mutation_possible_after_withdraw() {
         }));
         assert!(r.is_err(), "fund after withdraw must panic");
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// compute_investor_payout — issue #245
+//
+// Verifies the on-chain pro-rata view against the formula in docs/escrow-pro-rata.md:
+//   coupon       = total_principal × effective_yield_bps / 10_000  (floor)
+//   settle_pool  = total_principal + coupon
+//   gross_payout = contribution × settle_pool / total_principal     (floor)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Returns 0 for an address that never contributed.
+#[test]
+fn compute_payout_returns_zero_for_non_investor() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let stranger = Address::generate(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&stranger), 0);
+}
+
+/// Returns 0 before the snapshot exists (escrow still open, target not yet reached).
+#[test]
+fn compute_payout_returns_zero_before_snapshot() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP_PRE"),
+        &sme,
+        &10_000i128,
+        &500i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    // Deposit below target — no snapshot written yet.
+    client.fund(&investor, &1i128);
+    assert_eq!(client.compute_investor_payout(&investor), 0);
+}
+
+/// Single investor funding the full target.
+///
+/// Formula (yield = 5 %):
+///   coupon       = 10_000 × 500 / 10_000 = 500
+///   settle_pool  = 10_000 + 500 = 10_500
+///   gross_payout = 10_000 × 10_500 / 10_000 = 10_500
+#[test]
+fn compute_payout_single_investor_full_target() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP001"),
+        &sme,
+        &10_000i128,
+        &500i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&investor, &10_000i128);
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&investor), 10_500i128);
+}
+
+/// Two equal investors — each receives half the settle pool.
+///
+/// Formula (yield = 10 %):
+///   coupon = 2_000 × 1_000 / 10_000 = 200  →  settle_pool = 2_200
+///   payout each = 1_000 × 2_200 / 2_000 = 1_100
+#[test]
+fn compute_payout_two_equal_investors() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP002"),
+        &sme,
+        &2_000i128,
+        &1_000i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&inv_a, &1_000i128);
+    client.fund(&inv_b, &1_000i128);
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&inv_a), 1_100i128);
+    assert_eq!(client.compute_investor_payout(&inv_b), 1_100i128);
+}
+
+/// Aggregate invariant: sum of all payouts ≤ settle_pool (floor rounding, 3 investors).
+///
+/// Extreme case: 100 % yield — maximises rounding stress.
+///   total_principal = 3, coupon = 3  →  settle_pool = 6
+///   each investor (1 unit): 1 × 6 / 3 = 2  →  sum = 6 ≤ 6 ✓
+#[test]
+fn compute_payout_aggregate_does_not_exceed_settle_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let inv_c = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP003"),
+        &sme,
+        &3i128,
+        &10_000i64, // 100 % yield
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&inv_a, &1i128);
+    client.fund(&inv_b, &1i128);
+    client.fund(&inv_c, &1i128);
+    client.settle();
+
+    let pa = client.compute_investor_payout(&inv_a);
+    let pb = client.compute_investor_payout(&inv_b);
+    let pc = client.compute_investor_payout(&inv_c);
+    let sum = pa + pb + pc;
+
+    assert_eq!(pa, 2i128, "inv_a payout");
+    assert_eq!(pb, 2i128, "inv_b payout");
+    assert_eq!(pc, 2i128, "inv_c payout");
+    assert!(sum <= 6i128, "aggregate {sum} exceeded settle_pool 6");
+}
+
+/// Floor rounding: unequal 2:1 split with zero yield.
+///
+///   total_principal = 3, yield = 0  →  settle_pool = 3
+///   inv_a (2): 2 × 3 / 3 = 2
+///   inv_b (1): 1 × 3 / 3 = 1
+#[test]
+fn compute_payout_floor_rounding_unequal_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP004"),
+        &sme,
+        &3i128,
+        &0i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&inv_a, &2i128);
+    client.fund(&inv_b, &1i128);
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&inv_a), 2i128);
+    assert_eq!(client.compute_investor_payout(&inv_b), 1i128);
+    assert!(
+        client.compute_investor_payout(&inv_a) + client.compute_investor_payout(&inv_b) <= 3i128
+    );
+}
+
+/// Zero yield: payout equals principal contribution exactly.
+#[test]
+fn compute_payout_zero_yield_equals_principal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let inv = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP006"),
+        &sme,
+        &5_000i128,
+        &0i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&inv, &5_000i128);
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&inv), 5_000i128);
+}
+
+/// Over-funded escrow: total_principal > funding_target; pro-rata still correct.
+///
+///   funding_target = 1_000, total_principal = 1_500, yield = 0
+///   each investor (750 units): 750 × 1_500 / 1_500 = 750
+#[test]
+fn compute_payout_with_over_funding() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "CP007"),
+        &sme,
+        &1_000i128,
+        &0i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&inv_a, &750i128);
+    client.fund(&inv_b, &750i128); // pushes total to 1_500 > target
+    client.settle();
+
+    assert_eq!(client.compute_investor_payout(&inv_a), 750i128);
+    assert_eq!(client.compute_investor_payout(&inv_b), 750i128);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// claim_investor_payout dedupe regression — issue #256
+//
+// Verifies the single-fetch refactor works correctly end-to-end and that the
+// removed redundant "Investor did not participate" assertion does not leave a
+// gap in the participation guard.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Claim executes cleanly with the consolidated single-read path (happy path).
+/// A second call must be a silent no-op — idempotent, no re-emit.
+#[test]
+fn claim_dedupe_single_read_happy_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "DED001"),
+        &sme,
+        &1_000i128,
+        &200i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&investor, &1_000i128);
+    client.settle();
+
+    // First claim — must succeed.
+    client.claim_investor_payout(&investor);
+    assert!(client.is_investor_claimed(&investor));
+
+    // Second claim — must be idempotent (no panic, no re-emit).
+    client.claim_investor_payout(&investor);
+    assert!(client.is_investor_claimed(&investor));
+}
+
+/// Claim correctly rejects a stranger with the deduplicated read path.
+#[test]
+#[should_panic(expected = "Address has no contribution to claim")]
+fn claim_dedupe_stranger_still_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "DED002"),
+        &sme,
+        &1_000i128,
+        &200i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&investor, &1_000i128);
+    client.settle();
+
+    client.claim_investor_payout(&stranger); // must panic: no contribution
+}
+
+/// Legal hold still blocks the claim after the dedupe refactor.
+#[test]
+#[should_panic]
+fn claim_dedupe_hold_still_blocks() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "DED003"),
+        &sme,
+        &1_000i128,
+        &200i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(&investor, &1_000i128);
+    client.settle();
+    client.set_legal_hold(&true);
+
+    client.claim_investor_payout(&investor); // must panic: hold active
 }
